@@ -17,9 +17,8 @@
   <div id="list">Loading…</div>
 
   <script>
-    // Fetch local XML and render items. Assumes columns.xml at ./public/columns.xml
     (function(){
-      const xmlPath = './public/columns.xml';
+      const xmlPath = './columns.xml';
       function el(tag, txt){ const e=document.createElement(tag); if(txt) e.textContent = txt; return e; }
       fetch(xmlPath).then(r => r.text()).then(str => {
         const parser = new DOMParser();
