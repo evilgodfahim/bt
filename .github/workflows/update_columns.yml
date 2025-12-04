@@ -2,7 +2,7 @@ name: Update Columns Feed
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # every 10 minutes
+    - cron: '*/10 * * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -29,9 +29,9 @@ jobs:
         env:
           FLARESOLVERR_URL: ${{ secrets.FLARESOLVERR_URL }}
         run: |
-          python scripts/fetch_columns.py \
+          python fetch_columns.py \
             --feed "https://www.banglatribune.com/feed/" \
-            --output public/columns.xml \
+            --output columns.xml \
             --max-items 500
 
       - name: Commit and push if changed
@@ -39,9 +39,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ -n "$(git status --porcelain)" ]; then
-            git add public/columns.xml
+            git add columns.xml
             git commit -m "Update columns feed: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             git push
           else
             echo "No changes."
-          fi
