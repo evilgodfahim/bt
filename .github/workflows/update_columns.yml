@@ -1,0 +1,47 @@
+name: Update Columns Feed
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run fetch script
+        env:
+          FLARESOLVERR_URL: ${{ secrets.FLARESOLVERR_URL }}
+        run: |
+          python scripts/fetch_columns.py \
+            --feed "https://www.banglatribune.com/feed/" \
+            --output public/columns.xml \
+            --max-items 500
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain)" ]; then
+            git add public/columns.xml
+            git commit -m "Update columns feed: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            git push
+          else
+            echo "No changes."
+          fi
