@@ -7,9 +7,6 @@ prepend new items to output XML, keep max N items (default 500).
 import os
 import sys
 import argparse
-import json
-import time
-from urllib.parse import urlparse
 import requests
 import feedparser
 import xml.etree.ElementTree as ET
@@ -19,11 +16,9 @@ from datetime import datetime, timezone
 import email.utils
 
 # -------------------------
-# Helpers (small definitions)
+# Helpers
 # -------------------------
 def rfc2822(dt):
-    """Return RFC-2822 formatted date string for RSS <pubDate>."""
-    # dt: aware or naive; convert to aware UTC
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     dt_utc = dt.astimezone(timezone.utc)
@@ -48,7 +43,6 @@ def load_existing_items(path):
             link = it.findtext('link') or ''
             guid = it.findtext('guid') or link
             pubdate = it.findtext('pubDate')
-            # keep raw xml element to preserve description etc
             items.append({'guid': guid, 'link': link, 'pubDate': pubdate, 'element': it})
     except Exception:
         return items
@@ -65,7 +59,6 @@ def entry_to_item_element(entry):
     guid = ET.SubElement(item, 'guid')
     guid.text = entry.get('link', entry.get('id', ''))
 
-    # description: prefer content, then summary
     desc_text = ''
     if 'content' in entry and len(entry.content) > 0:
         desc_text = entry.content[0].value
@@ -74,7 +67,6 @@ def entry_to_item_element(entry):
     desc = ET.SubElement(item, 'description')
     desc.text = desc_text
 
-    # pubDate: parse if available
     pub = entry.get('published') or entry.get('pubDate') or entry.get('updated')
     if pub:
         try:
@@ -90,15 +82,9 @@ def entry_to_item_element(entry):
     return item, pd
 
 # -------------------------
-# Main
+# Fetch via FlareSolverr
 # -------------------------
 def fetch_via_flaresolverr(flaresolverr_url, target_url, timeout=60):
-    """Request FlareSolverr to fetch target_url and return text response.
-
-    Expects FlareSolverr v1-like JSON API:
-      POST { "cmd": "request.get", "url": "<target>" }
-    Returns response body as text.
-    """
     if flaresolverr_url.endswith('/v1'):
         api_url = flaresolverr_url
     else:
@@ -107,28 +93,27 @@ def fetch_via_flaresolverr(flaresolverr_url, target_url, timeout=60):
     payload = {
         "cmd": "request.get",
         "url": target_url,
-        # increase if needed:
         "maxTimeout": int(timeout * 1000)
     }
     headers = {"Content-Type": "application/json"}
     resp = requests.post(api_url, json=payload, headers=headers, timeout=timeout + 10)
     resp.raise_for_status()
     j = resp.json()
-    # typical FlareSolverr shape: {"status":"ok","solution":{"response":"<...>"}}
-    if isinstance(j, dict):
-        sol = j.get('solution') or {}
-        response_html = sol.get('response') or sol.get('body') or j.get('response') or j.get('body')
-        if response_html:
-            return response_html
-    # fallback: if API directly returned text
+    sol = j.get('solution') or {}
+    response_html = sol.get('response') or sol.get('body') or j.get('response') or j.get('body')
+    if response_html:
+        return response_html
     return resp.text
 
+# -------------------------
+# Main
+# -------------------------
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--feed', required=True, help='RSS feed URL')
-    p.add_argument('--output', required=True, help='Output XML path (will be created/updated)')
+    p.add_argument('--output', required=True, help='Output XML path')
     p.add_argument('--flaresolverr', default=None, help='FlareSolverr base URL (env FLARESOLVERR_URL used if absent)')
-    p.add_argument('--max-items', type=int, default=500, help='Maximum items to keep (default 500)')
+    p.add_argument('--max-items', type=int, default=500, help='Maximum items to keep')
     args = p.parse_args()
 
     feed_url = args.feed
@@ -136,24 +121,19 @@ def main():
     max_items = args.max_items
     fl_url = args.flaresolverr or os.environ.get('FLARESOLVERR_URL')
     if not fl_url:
-        print("ERROR: FlareSolverr URL not provided (env FLARESOLVERR_URL or --flaresolverr).", file=sys.stderr)
+        print("ERROR: FlareSolverr URL not provided.", file=sys.stderr)
         sys.exit(2)
 
-    # fetch via flaresolverr
     try:
         body = fetch_via_flaresolverr(fl_url, feed_url, timeout=60)
     except Exception as e:
         print("Fetch error:", e, file=sys.stderr)
         sys.exit(3)
 
-    # parse feed
     parsed = feedparser.parse(body)
     entries = parsed.entries or []
-
-    # filter only entries whose link contains '/columns/'
     filtered = [e for e in entries if '/columns/' in (e.get('link','') or '')]
 
-    # convert to item elements with pubDate
     new_items = []
     for e in filtered:
         try:
@@ -162,8 +142,41 @@ def main():
         except Exception:
             continue
 
-    # load existing items
     existing = load_existing_items(out_path)
+    keyed = {}
+    for it in new_items:
+        keyed[it['guid']] = it
+    for ex in existing:
+        if ex['guid'] not in keyed:
+            keyed[ex['guid']] = ex
+
+    def parse_pubdate_string(s):
+        try:
+            return dtparser.parse(s)
+        except Exception:
+            return datetime.now(timezone.utc)
+
+    all_items_sorted = sorted(list(keyed.values()), key=lambda x: parse_pubdate_string(x.get('pubDate') or ''), reverse=True)
+    all_items_sorted = all_items_sorted[:max_items]
+
+    rss = ET.Element('rss', version='2.0')
+    channel = ET.SubElement(rss, 'channel')
+    ET.SubElement(channel, 'title').text = 'BanglaTribune Columns (filtered)'
+    ET.SubElement(channel, 'link').text = feed_url
+    ET.SubElement(channel, 'description').text = 'Filtered feed: only /columns/ items'
+    ET.SubElement(channel, 'lastBuildDate').text = rfc2822(datetime.now(timezone.utc))
+
+    for it in all_items_sorted:
+        el = it.get('element')
+        if isinstance(el, ET.Element):
+            channel.append(el)
+
+    pretty = prettify_xml(rss)
+    with open(out_path, 'wb') as f:
+        f.write(pretty)
+
+if __name__ == '__main__':
+    main()    existing = load_existing_items(out_path)
 
     # deduplicate by link/guid: build dict keyed by guid
     keyed = {}
