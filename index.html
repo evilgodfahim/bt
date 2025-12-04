@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>BanglaTribune — Columns (filtered)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Roboto, "Helvetica Neue", Arial; padding: 24px; max-width:800px; margin:auto; }
+    h1 { margin-bottom: 0.2rem; }
+    time { color: #666; font-size: 0.9rem; }
+    .item { margin: 18px 0; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+    .desc { margin-top: 6px; color:#222; }
+  </style>
+</head>
+<body>
+  <h1>BanglaTribune — Columns</h1>
+  <div id="list">Loading…</div>
+
+  <script>
+    // Fetch local XML and render items. Assumes columns.xml at ./public/columns.xml
+    (function(){
+      const xmlPath = './public/columns.xml';
+      function el(tag, txt){ const e=document.createElement(tag); if(txt) e.textContent = txt; return e; }
+      fetch(xmlPath).then(r => r.text()).then(str => {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(str, "application/xml");
+        const items = Array.from(doc.querySelectorAll('channel > item')).slice(0,200);
+        const container = document.getElementById('list');
+        container.innerHTML = '';
+        items.forEach(it => {
+          const div = document.createElement('div'); div.className='item';
+          const title = it.querySelector('title') ? it.querySelector('title').textContent : '(no title)';
+          const link = it.querySelector('link') ? it.querySelector('link').textContent : '#';
+          const pub = it.querySelector('pubDate') ? it.querySelector('pubDate').textContent : '';
+          const desc = it.querySelector('description') ? it.querySelector('description').textContent : '';
+
+          const a = document.createElement('a'); a.href = link; a.target='_blank'; a.rel='noopener';
+          a.textContent = title;
+          const h = document.createElement('div'); h.appendChild(a);
+          const t = el('div', pub); t.style.marginTop = '4px'; t.style.color='#666'; t.style.fontSize='0.9rem';
+          const d = document.createElement('div'); d.className='desc'; d.innerHTML = desc || '';
+
+          div.appendChild(h);
+          if (pub) div.appendChild(t);
+          div.appendChild(d);
+          container.appendChild(div);
+        });
+        if (items.length === 0) container.textContent = 'No items found.';
+      }).catch(err => {
+        document.getElementById('list').textContent = 'Failed to load feed: ' + err;
+      });
+    })();
+  </script>
+</body>
+</html>
