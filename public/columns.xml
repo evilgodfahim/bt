@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>BanglaTribune Columns (filtered)</title>
+    <link>https://www.banglatribune.com/feed/</link>
+    <description>Filtered feed: only /columns/ items</description>
+    <lastBuildDate><!-- generated --></lastBuildDate>
+  </channel>
+</rss>
