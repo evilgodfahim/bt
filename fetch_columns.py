@@ -2,6 +2,7 @@
 """
 Fetch RSS via FlareSolverr, keep only entries whose link contains '/columns/',
 prepend new items to output XML, keep max N items (default 500).
+FlareSolverr URL is hardcoded as: http://localhost:8191/v1
 """
 
 import os
@@ -16,164 +17,157 @@ from datetime import datetime, timezone
 import email.utils
 
 # -------------------------
-# Helpers
+# HARD-CODED FLARESOLVERR URL
 # -------------------------
+FLARESOLVERR_URL = "http://localhost:8191/v1"
+
+
 def rfc2822(dt):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    dt_utc = dt.astimezone(timezone.utc)
-    return email.utils.format_datetime(dt_utc)
+    return email.utils.format_datetime(dt.astimezone(timezone.utc))
+
 
 def prettify_xml(elem):
     raw = ET.tostring(elem, encoding='utf-8')
-    parsed = minidom.parseString(raw)
-    return parsed.toprettyxml(indent="  ", encoding='utf-8')
+    return minidom.parseString(raw).toprettyxml(indent="  ", encoding='utf-8')
+
 
 def load_existing_items(path):
     items = []
     if not os.path.exists(path):
         return items
+
     try:
         tree = ET.parse(path)
-        root = tree.getroot()
-        channel = root.find('channel')
+        channel = tree.getroot().find('channel')
         if channel is None:
             return items
+
         for it in channel.findall('item'):
             link = it.findtext('link') or ''
             guid = it.findtext('guid') or link
-            pubdate = it.findtext('pubDate')
-            items.append({'guid': guid, 'link': link, 'pubDate': pubdate, 'element': it})
+            pub = it.findtext('pubDate')
+            items.append({
+                'guid': guid,
+                'link': link,
+                'pubDate': pub,
+                'element': it
+            })
     except Exception:
         return items
+
     return items
+
 
 def entry_to_item_element(entry):
     item = ET.Element('item')
-    title = ET.SubElement(item, 'title')
-    title.text = entry.get('title', '')
 
-    link = ET.SubElement(item, 'link')
-    link.text = entry.get('link', '')
+    t = ET.SubElement(item, 'title')
+    t.text = entry.get('title', '')
 
-    guid = ET.SubElement(item, 'guid')
-    guid.text = entry.get('link', entry.get('id', ''))
+    l = ET.SubElement(item, 'link')
+    l.text = entry.get('link', '')
 
-    desc_text = ''
-    if 'content' in entry and len(entry.content) > 0:
-        desc_text = entry.content[0].value
-    elif 'summary' in entry:
-        desc_text = entry.summary
-    desc = ET.SubElement(item, 'description')
-    desc.text = desc_text
+    g = ET.SubElement(item, 'guid')
+    g.text = entry.get('link', entry.get('id', ''))
 
-    pub = entry.get('published') or entry.get('pubDate') or entry.get('updated')
-    if pub:
-        try:
-            dt = dtparser.parse(pub)
-            pd = rfc2822(dt)
-        except Exception:
-            pd = rfc2822(datetime.now(timezone.utc))
+    d = ET.SubElement(item, 'description')
+    if 'content' in entry and entry.content:
+        d.text = entry.content[0].value
     else:
-        pd = rfc2822(datetime.now(timezone.utc))
-    pd_el = ET.SubElement(item, 'pubDate')
-    pd_el.text = pd
+        d.text = entry.get('summary', '')
 
-    return item, pd
+    pub = entry.get('published') or entry.get('updated') or entry.get('pubDate')
+    try:
+        dt = dtparser.parse(pub) if pub else datetime.now(timezone.utc)
+    except Exception:
+        dt = datetime.now(timezone.utc)
 
-# -------------------------
-# Fetch via FlareSolverr
-# -------------------------
-def fetch_via_flaresolverr(flaresolverr_url, target_url, timeout=60):
-    if flaresolverr_url.endswith('/v1'):
-        api_url = flaresolverr_url
-    else:
-        api_url = flaresolverr_url.rstrip('/') + '/v1'
+    pd = ET.SubElement(item, 'pubDate')
+    pd.text = rfc2822(dt)
 
+    return item, pd.text
+
+
+def fetch_via_flaresolverr(url, target, timeout=60):
     payload = {
         "cmd": "request.get",
-        "url": target_url,
-        "maxTimeout": int(timeout * 1000)
+        "url": target,
+        "maxTimeout": timeout * 1000
     }
     headers = {"Content-Type": "application/json"}
-    resp = requests.post(api_url, json=payload, headers=headers, timeout=timeout + 10)
-    resp.raise_for_status()
-    j = resp.json()
-    sol = j.get('solution') or {}
-    response_html = sol.get('response') or sol.get('body') or j.get('response') or j.get('body')
-    if response_html:
-        return response_html
-    return resp.text
 
-# -------------------------
-# Main
-# -------------------------
+    r = requests.post(url, json=payload, headers=headers, timeout=timeout + 10)
+    r.raise_for_status()
+
+    j = r.json()
+    sol = j.get("solution") or {}
+    html = sol.get("response") or sol.get("body")
+
+    return html if html else r.text
+
+
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument('--feed', required=True, help='RSS feed URL')
-    p.add_argument('--output', required=True, help='Output XML path')
-    p.add_argument('--flaresolverr', default=None, help='FlareSolverr base URL (env FLARESOLVERR_URL used if absent)')
-    p.add_argument('--max-items', type=int, default=500, help='Maximum items to keep')
-    args = p.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--feed', required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--max-items', type=int, default=500)
+    args = parser.parse_args()
 
     feed_url = args.feed
     out_path = args.output
     max_items = args.max_items
-    fl_url = args.flaresolverr or os.environ.get('FLARESOLVERR_URL')
-    if not fl_url:
-        print("ERROR: FlareSolverr URL not provided.", file=sys.stderr)
-        sys.exit(2)
 
-    try:
-        body = fetch_via_flaresolverr(fl_url, feed_url, timeout=60)
-    except Exception as e:
-        print("Fetch error:", e, file=sys.stderr)
-        sys.exit(3)
-
+    body = fetch_via_flaresolverr(FLARESOLVERR_URL, feed_url, timeout=60)
     parsed = feedparser.parse(body)
     entries = parsed.entries or []
-    filtered = [e for e in entries if '/columns/' in (e.get('link','') or '')]
+
+    filtered = [e for e in entries if "/columns/" in (e.get("link", "") or "")]
 
     new_items = []
     for e in filtered:
-        try:
-            item_el, pubdate = entry_to_item_element(e)
-            new_items.append({'element': item_el, 'link': e.get('link',''), 'pubDate': pubdate, 'guid': e.get('link','')})
-        except Exception:
-            continue
+        el, pub = entry_to_item_element(e)
+        new_items.append({
+            'guid': e.get('link', ''),
+            'link': e.get('link', ''),
+            'pubDate': pub,
+            'element': el
+        })
 
     existing = load_existing_items(out_path)
-    keyed = {}
-    for it in new_items:
-        keyed[it['guid']] = it
-    for ex in existing:
-        if ex['guid'] not in keyed:
-            keyed[ex['guid']] = ex
 
-    def parse_pubdate_string(s):
+    store = {}
+    for n in new_items:
+        store[n['guid']] = n
+    for e in existing:
+        if e['guid'] not in store:
+            store[e['guid']] = e
+
+    def pd(x):
         try:
-            return dtparser.parse(s)
+            return dtparser.parse(x or "")
         except Exception:
             return datetime.now(timezone.utc)
 
-    all_items_sorted = sorted(list(keyed.values()), key=lambda x: parse_pubdate_string(x.get('pubDate') or ''), reverse=True)
-    all_items_sorted = all_items_sorted[:max_items]
+    final = sorted(store.values(), key=lambda x: pd(x['pubDate']), reverse=True)
+    final = final[:max_items]
 
-    rss = ET.Element('rss', version='2.0')
-    channel = ET.SubElement(rss, 'channel')
-    ET.SubElement(channel, 'title').text = 'BanglaTribune Columns (filtered)'
-    ET.SubElement(channel, 'link').text = feed_url
-    ET.SubElement(channel, 'description').text = 'Filtered feed: only /columns/ items'
-    ET.SubElement(channel, 'lastBuildDate').text = rfc2822(datetime.now(timezone.utc))
+    rss = ET.Element("rss", version="2.0")
+    channel = ET.SubElement(rss, "channel")
 
-    for it in all_items_sorted:
-        el = it.get('element')
-        if isinstance(el, ET.Element):
-            channel.append(el)
+    ET.SubElement(channel, "title").text = "BanglaTribune Columns (Filtered)"
+    ET.SubElement(channel, "link").text = feed_url
+    ET.SubElement(channel, "description").text = "Filtered feed containing only items with /columns/"
+    ET.SubElement(channel, "lastBuildDate").text = rfc2822(datetime.now(timezone.utc))
 
-    pretty = prettify_xml(rss)
-    with open(out_path, 'wb') as f:
-        f.write(pretty)
+    for it in final:
+        channel.append(it['element'])
 
-if __name__ == '__main__':
-    main()
+    xml = prettify_xml(rss)
+    with open(out_path, "wb") as f:
+        f.write(xml)
+
+
+if __name__ == "__main__":
+    main() 
