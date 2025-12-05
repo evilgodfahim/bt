@@ -11,35 +11,42 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
-      - name: Install Python dependencies
+      - name: Install deps
         run: |
           pip install feedparser python-dateutil requests
 
-      - name: Start FlareSolverr container
+      - name: Start FlareSolverr (Docker Hub image)
         run: |
-          docker run -d --name flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
+          docker run -d \
+            --name flaresolverr \
+            --shm-size=2g \
+            --memory=1g \
+            -p 8191:8191 \
+            flaresolverr/flaresolverr:latest
 
-      - name: Wait for FlareSolverr to start
+      - name: Wait for FlareSolverr
         run: |
-          for i in {1..15}
-          do
+          echo "Waiting for FlareSolverr..."
+          for i in {1..20}; do
             if curl -s http://localhost:8191/v1 > /dev/null; then
-              echo "FlareSolverr ready"
+              echo "FlareSolverr is ready"
               exit 0
             fi
-            echo "Waiting for FlareSolverr..."
+            echo "Still starting... ($i)"
             sleep 3
           done
-          echo "FlareSolverr failed to start"
+          echo "FlareSolverr did not start. Dumping logs:"
+          docker logs flaresolverr
           exit 1
 
       - name: Run fetch script
@@ -49,12 +56,12 @@ jobs:
             --output columns.xml \
             --max-items 500
 
-      - name: Commit & Push
+      - name: Commit & push
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           if [ -n "$(git status --porcelain)" ]; then
             git add columns.xml
-            git commit -m "Update feed"
+            git commit -m "Update columns feed"
             git push
           fi
