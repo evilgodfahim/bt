@@ -23,7 +23,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install feedparser python-dateutil requests
+          pip install -r requirements.txt
 
       - name: Start FlareSolverr (Docker Hub image)
         run: |
