@@ -2,6 +2,7 @@
 """
 Fetch RSS via FlareSolverr, keep only entries whose link contains '/columns/',
 prepend new items to output XML, keep max N items (default 500).
+Full article text is fetched for new items only; existing items are left as-is.
 FlareSolverr URL is hardcoded as: http://localhost:8191/v1
 """
 
@@ -12,6 +13,7 @@ import requests
 import feedparser
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
 from datetime import datetime, timezone
 import email.utils
@@ -108,6 +110,28 @@ def fetch_via_flaresolverr(url, target, timeout=60):
     return html if html else r.text
 
 
+def fetch_full_text(article_url, timeout=60):
+    """
+    Fetch the full article text from an article page via FlareSolverr.
+    Extracts paragraphs from .jw_article_body and returns them joined.
+    Returns empty string on failure.
+    """
+    try:
+        html = fetch_via_flaresolverr(FLARESOLVERR_URL, article_url, timeout)
+        soup = BeautifulSoup(html, "lxml")
+        body = soup.select_one(".jw_article_body")
+        if not body:
+            print(f"[WARN] .jw_article_body not found in {article_url}", file=sys.stderr)
+            return ""
+        paragraphs = [p.get_text(separator=" ", strip=True)
+                      for p in body.find_all("p")
+                      if p.get_text(strip=True)]
+        return "\n\n".join(paragraphs)
+    except Exception as e:
+        print(f"[WARN] Full-text fetch failed for {article_url}: {e}", file=sys.stderr)
+        return ""
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--feed', required=True)
@@ -137,6 +161,31 @@ def main():
 
     existing = load_existing_items(out_path)
 
+    # Determine which items are truly new (not already in the saved XML)
+    existing_guids = {e['guid'] for e in existing}
+    truly_new = [n for n in new_items if n['guid'] not in existing_guids]
+
+    print(f"[INFO] {len(truly_new)} new article(s) to fetch full text for.")
+
+    # Fetch full article text only for new items
+    for n in truly_new:
+        url = n['link']
+        if not url:
+            continue
+        print(f"[INFO] Fetching full text: {url}")
+        full_text = fetch_full_text(url)
+        if full_text:
+            # Replace the description element's text with full article content
+            desc_el = n['element'].find('description')
+            if desc_el is not None:
+                desc_el.text = full_text
+            else:
+                d = ET.SubElement(n['element'], 'description')
+                d.text = full_text
+        else:
+            print(f"[WARN] No full text retrieved for {url}, keeping RSS summary.", file=sys.stderr)
+
+    # Merge: new items take precedence; existing items keep their existing data
     store = {}
     for n in new_items:
         store[n['guid']] = n
@@ -168,6 +217,8 @@ def main():
     with open(out_path, "wb") as f:
         f.write(xml)
 
+    print(f"[OK] {out_path} -> {len(final)} items")
+
 
 if __name__ == "__main__":
-    main() 
+    main()
