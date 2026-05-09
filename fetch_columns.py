@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """
-Fetch RSS via FlareSolverr, keep only entries whose link contains '/columns/',
-prepend new items to output XML, keep max N items (default 500).
-Full article text is fetched for new items only; existing items are left as-is.
-FlareSolverr URL is hardcoded as: http://localhost:8191/v1
+Multi-source RSS fetcher with full-text enrichment via FlareSolverr.
+
+Each source in SOURCES defines:
+  feed_url  – RSS/Atom feed to fetch
+  output    – output XML file path
+  title     – RSS channel title
+  desc      – RSS channel description
+  filter    – optional substring; if set, only items whose link contains it
+               are kept (e.g. "/columns/").  Set to "" or None for all items.
+
+Full article text is fetched (via FlareSolverr) only for new items not
+already present in the saved XML.  Existing items are preserved as-is.
+
+FlareSolverr URL: http://localhost:8191/v1  (hard-coded)
 """
 
 import os
 import sys
-import argparse
 import requests
 import feedparser
 import xml.etree.ElementTree as ET
@@ -18,206 +27,343 @@ from dateutil import parser as dtparser
 from datetime import datetime, timezone
 import email.utils
 
-# -------------------------
-# HARD-CODED FLARESOLVERR URL
-# -------------------------
+# ---------------------------------------------------------------------------
+# Hard-coded configuration
+# ---------------------------------------------------------------------------
+
 FLARESOLVERR_URL = "http://localhost:8191/v1"
+MAX_ITEMS        = 500
 
+# Add / remove sources here.  Set "filter" to "" to keep all items.
+SOURCES = [
+    {
+        "feed_url": "https://www.banglatribune.com/feed/columns",
+        "output":   "banglatribune_columns.xml",
+        "title":    "Bangla Tribune – Columns",
+        "desc":     "Column articles from Bangla Tribune",
+        "filter":   "/columns/",
+    },
+    {
+        "feed_url": "https://www.banglatribune.com/feed/",
+        "output":   "banglatribune.xml",
+        "title":    "Bangla Tribune",
+        "desc":     "Latest news from Bangla Tribune",
+        "filter":   "",          # no filter – keep all items
+    },
+]
 
-def rfc2822(dt):
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+def rfc2822(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return email.utils.format_datetime(dt.astimezone(timezone.utc))
 
 
-def prettify_xml(elem):
-    raw = ET.tostring(elem, encoding='utf-8')
-    return minidom.parseString(raw).toprettyxml(indent="  ", encoding='utf-8')
+def prettify_xml(elem: ET.Element) -> bytes:
+    raw = ET.tostring(elem, encoding="utf-8")
+    return minidom.parseString(raw).toprettyxml(indent="  ", encoding="utf-8")
 
 
-def load_existing_items(path):
-    items = []
-    if not os.path.exists(path):
-        return items
-
+def parse_pubdate(raw: str | None) -> datetime:
     try:
-        tree = ET.parse(path)
-        channel = tree.getroot().find('channel')
-        if channel is None:
-            return items
-
-        for it in channel.findall('item'):
-            link = it.findtext('link') or ''
-            guid = it.findtext('guid') or link
-            pub = it.findtext('pubDate')
-            items.append({
-                'guid': guid,
-                'link': link,
-                'pubDate': pub,
-                'element': it
-            })
+        return dtparser.parse(raw) if raw else datetime.now(timezone.utc)
     except Exception:
-        return items
-
-    return items
+        return datetime.now(timezone.utc)
 
 
-def entry_to_item_element(entry):
-    item = ET.Element('item')
+# ---------------------------------------------------------------------------
+# FlareSolverr
+# ---------------------------------------------------------------------------
 
-    t = ET.SubElement(item, 'title')
-    t.text = entry.get('title', '')
-
-    l = ET.SubElement(item, 'link')
-    l.text = entry.get('link', '')
-
-    g = ET.SubElement(item, 'guid')
-    g.text = entry.get('link', entry.get('id', ''))
-
-    d = ET.SubElement(item, 'description')
-    if 'content' in entry and entry.content:
-        d.text = entry.content[0].value
-    else:
-        d.text = entry.get('summary', '')
-
-    pub = entry.get('published') or entry.get('updated') or entry.get('pubDate')
-    try:
-        dt = dtparser.parse(pub) if pub else datetime.now(timezone.utc)
-    except Exception:
-        dt = datetime.now(timezone.utc)
-
-    pd = ET.SubElement(item, 'pubDate')
-    pd.text = rfc2822(dt)
-
-    return item, pd.text
-
-
-def fetch_via_flaresolverr(url, target, timeout=60):
+def flaresolverr_get(target_url: str, timeout: int = 60) -> str:
     payload = {
-        "cmd": "request.get",
-        "url": target,
-        "maxTimeout": timeout * 1000
+        "cmd":        "request.get",
+        "url":        target_url,
+        "maxTimeout": timeout * 1000,
     }
-    headers = {"Content-Type": "application/json"}
-
-    r = requests.post(url, json=payload, headers=headers, timeout=timeout + 10)
+    r = requests.post(
+        FLARESOLVERR_URL,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=timeout + 10,
+    )
     r.raise_for_status()
-
-    j = r.json()
-    sol = j.get("solution") or {}
-    html = sol.get("response") or sol.get("body")
-
-    return html if html else r.text
+    sol = r.json().get("solution") or {}
+    html = sol.get("response") or sol.get("body") or r.text
+    return html
 
 
-def fetch_full_text(article_url, timeout=60):
+# ---------------------------------------------------------------------------
+# Full-text extraction
+# ---------------------------------------------------------------------------
+
+def fetch_full_text(article_url: str, timeout: int = 60) -> str:
     """
-    Fetch the full article text from an article page via FlareSolverr.
-    Extracts paragraphs from .jw_article_body and returns them joined.
-    Returns empty string on failure.
+    Fetch an article page via FlareSolverr and extract body paragraphs
+    from .jw_article_body.  Returns joined text or "" on failure.
     """
     try:
-        html = fetch_via_flaresolverr(FLARESOLVERR_URL, article_url, timeout)
+        html = flaresolverr_get(article_url, timeout)
         soup = BeautifulSoup(html, "lxml")
         body = soup.select_one(".jw_article_body")
         if not body:
-            print(f"[WARN] .jw_article_body not found in {article_url}", file=sys.stderr)
+            print(f"[WARN] .jw_article_body not found in {article_url}",
+                  file=sys.stderr)
             return ""
-        paragraphs = [p.get_text(separator=" ", strip=True)
-                      for p in body.find_all("p")
-                      if p.get_text(strip=True)]
+        paragraphs = [
+            p.get_text(separator=" ", strip=True)
+            for p in body.find_all("p")
+            if p.get_text(strip=True)
+        ]
         return "\n\n".join(paragraphs)
     except Exception as e:
-        print(f"[WARN] Full-text fetch failed for {article_url}: {e}", file=sys.stderr)
+        print(f"[WARN] Full-text fetch failed for {article_url}: {e}",
+              file=sys.stderr)
         return ""
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--feed', required=True)
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--max-items', type=int, default=500)
-    args = parser.parse_args()
+def fetch_featured_image(article_url: str, html: str | None = None) -> str:
+    """
+    Extract the high-res featured image URL from a Bangla Tribune article page.
+    Looks for span[data-ari] JSON first, then falls back to og:image.
+    Pass pre-fetched html to avoid a second FlareSolverr round-trip, or
+    leave None to fetch the page here.
+    """
+    import json as _json
 
-    feed_url = args.feed
-    out_path = args.output
-    max_items = args.max_items
+    if html is None:
+        try:
+            html = flaresolverr_get(article_url)
+        except Exception:
+            return ""
 
-    body = fetch_via_flaresolverr(FLARESOLVERR_URL, feed_url, timeout=60)
-    parsed = feedparser.parse(body)
+    soup = BeautifulSoup(html, "lxml")
+
+    IMAGE_CDN = "https://cdn.banglatribune.net/contents/uploads/"
+
+    featured = soup.select_one(".featured_image span[data-ari]")
+    if featured:
+        try:
+            data = _json.loads(featured.get("data-ari", "{}"))
+            path = data.get("path", "").split("?")[0]
+            if path:
+                return IMAGE_CDN + path
+        except Exception:
+            pass
+
+    og = soup.find("meta", property="og:image")
+    if og:
+        return og.get("content", "")
+
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# XML helpers
+# ---------------------------------------------------------------------------
+
+def load_existing_items(path: str) -> list[dict]:
+    """Load saved items from an existing output XML file."""
+    items = []
+    if not os.path.exists(path):
+        return items
+    try:
+        channel = ET.parse(path).getroot().find("channel")
+        if channel is None:
+            return items
+        for it in channel.findall("item"):
+            link = it.findtext("link") or ""
+            guid = it.findtext("guid") or link
+            items.append({
+                "guid":    guid,
+                "link":    link,
+                "pubDate": it.findtext("pubDate"),
+                "element": it,
+            })
+    except Exception as e:
+        print(f"[WARN] Could not load existing XML ({path}): {e}",
+              file=sys.stderr)
+    return items
+
+
+def entry_to_element(entry: dict) -> tuple[ET.Element, str]:
+    """
+    Convert a feedparser entry to an <item> ET.Element.
+    Returns (element, rfc2822_pubdate_string).
+    """
+    item = ET.Element("item")
+
+    ET.SubElement(item, "title").text = entry.get("title", "")
+    ET.SubElement(item, "link").text  = entry.get("link", "")
+
+    g = ET.SubElement(item, "guid")
+    g.text = entry.get("link") or entry.get("id", "")
+
+    desc = ET.SubElement(item, "description")
+    if entry.get("content"):
+        desc.text = entry["content"][0].value
+    else:
+        desc.text = entry.get("summary", "")
+
+    raw_date = (
+        entry.get("published")
+        or entry.get("updated")
+        or entry.get("pubDate")
+    )
+    pub_str = rfc2822(parse_pubdate(raw_date))
+    ET.SubElement(item, "pubDate").text = pub_str
+
+    return item, pub_str
+
+
+def save_xml(
+    path: str,
+    final_items: list[dict],
+    feed_url: str,
+    title: str,
+    desc: str,
+) -> None:
+    rss     = ET.Element("rss", version="2.0")
+    channel = ET.SubElement(rss, "channel")
+
+    ET.SubElement(channel, "title").text         = title
+    ET.SubElement(channel, "link").text          = feed_url
+    ET.SubElement(channel, "description").text   = desc
+    ET.SubElement(channel, "lastBuildDate").text = rfc2822(
+        datetime.now(timezone.utc)
+    )
+
+    for it in final_items:
+        channel.append(it["element"])
+
+    xml_bytes = prettify_xml(rss)
+    with open(path, "wb") as f:
+        f.write(xml_bytes)
+    print(f"[OK] {path} → {len(final_items)} items")
+
+
+# ---------------------------------------------------------------------------
+# Per-source pipeline
+# ---------------------------------------------------------------------------
+
+def process_source(src: dict) -> None:
+    feed_url   = src["feed_url"]
+    out_path   = src["output"]
+    title      = src["title"]
+    desc       = src["desc"]
+    link_filter = src.get("filter") or ""
+
+    print(f"\n[INFO] Source  : {title}")
+    print(f"[INFO] Feed    : {feed_url}")
+    print(f"[INFO] Output  : {out_path}")
+    if link_filter:
+        print(f"[INFO] Filter  : '{link_filter}'")
+
+    # 1. Fetch feed via FlareSolverr
+    try:
+        raw_feed = flaresolverr_get(feed_url)
+    except Exception as e:
+        print(f"[SKIP] Cannot fetch feed: {e}", file=sys.stderr)
+        return
+
+    # 2. Parse with feedparser
+    parsed  = feedparser.parse(raw_feed)
     entries = parsed.entries or []
 
-    filtered = [e for e in entries if "/columns/" in (e.get("link", "") or "")]
+    # 3. Optional link filter
+    if link_filter:
+        entries = [e for e in entries if link_filter in (e.get("link") or "")]
+    print(f"[INFO] Feed entries after filter: {len(entries)}")
 
-    new_items = []
-    for e in filtered:
-        el, pub = entry_to_item_element(e)
+    # 4. Build new item list
+    new_items: list[dict] = []
+    for entry in entries:
+        el, pub = entry_to_element(entry)
         new_items.append({
-            'guid': e.get('link', ''),
-            'link': e.get('link', ''),
-            'pubDate': pub,
-            'element': el
+            "guid":    entry.get("link") or entry.get("id", ""),
+            "link":    entry.get("link", ""),
+            "pubDate": pub,
+            "element": el,
         })
 
-    existing = load_existing_items(out_path)
+    # 5. Load existing saved items
+    existing      = load_existing_items(out_path)
+    existing_guids = {e["guid"] for e in existing}
 
-    # Determine which items are truly new (not already in the saved XML)
-    existing_guids = {e['guid'] for e in existing}
-    truly_new = [n for n in new_items if n['guid'] not in existing_guids]
+    # 6. Identify truly new entries
+    truly_new = [n for n in new_items if n["guid"] not in existing_guids]
+    print(f"[INFO] {len(truly_new)} new article(s) to enrich.")
 
-    print(f"[INFO] {len(truly_new)} new article(s) to fetch full text for.")
-
-    # Fetch full article text only for new items
+    # 7. Fetch full text (and better image) for each new item
     for n in truly_new:
-        url = n['link']
+        url = n["link"]
         if not url:
             continue
-        print(f"[INFO] Fetching full text: {url}")
-        full_text = fetch_full_text(url)
+        print(f"[INFO] Fetching full text : {url}")
+        try:
+            html = flaresolverr_get(url)
+        except Exception as e:
+            print(f"[WARN] Could not fetch {url}: {e}", file=sys.stderr)
+            continue
+
+        # --- full text ---
+        soup = BeautifulSoup(html, "lxml")
+        body = soup.select_one(".jw_article_body")
+        if body:
+            paragraphs = [
+                p.get_text(separator=" ", strip=True)
+                for p in body.find_all("p")
+                if p.get_text(strip=True)
+            ]
+            full_text = "\n\n".join(paragraphs)
+        else:
+            full_text = ""
+            print(f"[WARN] .jw_article_body not found in {url}",
+                  file=sys.stderr)
+
         if full_text:
-            # Replace the description element's text with full article content
-            desc_el = n['element'].find('description')
+            desc_el = n["element"].find("description")
             if desc_el is not None:
                 desc_el.text = full_text
             else:
-                d = ET.SubElement(n['element'], 'description')
-                d.text = full_text
+                ET.SubElement(n["element"], "description").text = full_text
         else:
-            print(f"[WARN] No full text retrieved for {url}, keeping RSS summary.", file=sys.stderr)
+            print(f"[WARN] No full text for {url}; keeping RSS summary.",
+                  file=sys.stderr)
 
-    # Merge: new items take precedence; existing items keep their existing data
-    store = {}
+        # --- featured image ---
+        image_url = fetch_featured_image(url, html=html)
+        if image_url:
+            ET.SubElement(n["element"], "enclosure").set("url", image_url)
+
+    # 8. Merge: new_items override existing; unknown existing items appended
+    store: dict[str, dict] = {}
     for n in new_items:
-        store[n['guid']] = n
+        store[n["guid"]] = n
     for e in existing:
-        if e['guid'] not in store:
-            store[e['guid']] = e
+        if e["guid"] not in store:
+            store[e["guid"]] = e
 
-    def pd(x):
-        try:
-            return dtparser.parse(x or "")
-        except Exception:
-            return datetime.now(timezone.utc)
+    final = sorted(
+        store.values(),
+        key=lambda x: parse_pubdate(x["pubDate"]),
+        reverse=True,
+    )[:MAX_ITEMS]
 
-    final = sorted(store.values(), key=lambda x: pd(x['pubDate']), reverse=True)
-    final = final[:max_items]
+    # 9. Write XML
+    save_xml(out_path, final, feed_url, title, desc)
 
-    rss = ET.Element("rss", version="2.0")
-    channel = ET.SubElement(rss, "channel")
 
-    ET.SubElement(channel, "title").text = "BanglaTribune Columns (Filtered)"
-    ET.SubElement(channel, "link").text = feed_url
-    ET.SubElement(channel, "description").text = "Filtered feed containing only items with /columns/"
-    ET.SubElement(channel, "lastBuildDate").text = rfc2822(datetime.now(timezone.utc))
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
-    for it in final:
-        channel.append(it['element'])
-
-    xml = prettify_xml(rss)
-    with open(out_path, "wb") as f:
-        f.write(xml)
-
-    print(f"[OK] {out_path} -> {len(final)} items")
+def main() -> None:
+    for source in SOURCES:
+        process_source(source)
 
 
 if __name__ == "__main__":
