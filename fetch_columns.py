@@ -38,7 +38,7 @@ MAX_ITEMS        = 500
 SOURCES = [
     {
         "feed_url": "https://www.banglatribune.com/feed/columns",
-        "output":   "banglatribune_columns.xml",
+        "output":   "columns.xml",
         "title":    "Bangla Tribune – Columns",
         "desc":     "Column articles from Bangla Tribune",
         "filter":   "/columns/",
