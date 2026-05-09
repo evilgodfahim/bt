@@ -1,4 +1,4 @@
-name: Update Columns Feed
+name: Update RSS Feeds
 
 on:
   schedule:
@@ -51,17 +51,14 @@ jobs:
 
       - name: Run fetch script
         run: |
-          python fetch_columns.py \
-            --feed "https://www.banglatribune.com/feed/" \
-            --output columns.xml \
-            --max-items 500
+          python rss_fetcher.py
 
       - name: Commit & push
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
           if [ -n "$(git status --porcelain)" ]; then
-            git add columns.xml
-            git commit -m "Update columns feed"
+            git add columns.xml banglatribune.xml
+            git commit -m "Update RSS feeds [$(date -u '+%Y-%m-%d %H:%M UTC')]"
             git push
           fi
