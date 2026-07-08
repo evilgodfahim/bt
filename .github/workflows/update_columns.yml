@@ -28,11 +28,11 @@ jobs:
       - name: Start FlareSolverr (Docker Hub image)
         run: |
           docker run -d \
-            --name flaresolverr \
+            --name byparr \
             --shm-size=2g \
             --memory=1g \
             -p 8191:8191 \
-            flaresolverr/flaresolverr:latest
+            ghcr.io/thephaseless/byparr:latest
 
       - name: Wait for FlareSolverr
         run: |
