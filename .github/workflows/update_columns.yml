@@ -25,15 +25,32 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Start FlareSolverr (Docker Hub image)
+      - name: Start Redis
+        run: |
+          docker network create trawl-net
+          docker run -d \
+            --name redis \
+            --network trawl-net \
+            redis:alpine
+
+      - name: Start Trawl
         run: |
           docker run -d \
-            --name byparr \
-            --shm-size=2g \
-            --memory=1g \
+            --name trawl \
+            --network trawl-net \
             -p 8191:8191 \
-            ghcr.io/thephaseless/byparr:latest
+            -e REDIS_URL=redis://redis:6379 \
+            -e BROWSER_POOL_SIZE=2 \
+            -e RESIDENTIAL_PROXY_URL=${{ secrets.WEBSHARE_PROXY_URL }} \
+            ghcr.io/germondai/trawl:latest
 
+      - name: Wait for Trawl
+        run: |
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:8191/health && echo 'Trawl ready' && exit 0
+            sleep 2
+          done
+          docker logs trawl && exit 1
       - name: Wait for FlareSolverr
         run: |
           echo "Waiting for FlareSolverr..."
