@@ -21,7 +21,6 @@ import sys
 import requests
 import feedparser
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
 from datetime import datetime, timezone
@@ -34,7 +33,6 @@ import email.utils
 FLARESOLVERR_URL = "http://localhost:8191/v1"
 MAX_ITEMS        = 500
 
-# Add / remove sources here.  Set "filter" to "" to keep all items.
 SOURCES = [
     {
         "feed_url": "https://www.banglatribune.com/feed/columns",
@@ -48,7 +46,7 @@ SOURCES = [
         "output":   "banglatribune.xml",
         "title":    "Bangla Tribune",
         "desc":     "Latest news from Bangla Tribune",
-        "filter":   "",          # no filter – keep all items
+        "filter":   "",
     },
 ]
 
@@ -60,11 +58,6 @@ def rfc2822(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return email.utils.format_datetime(dt.astimezone(timezone.utc))
-
-
-def prettify_xml(elem: ET.Element) -> bytes:
-    raw = ET.tostring(elem, encoding="utf-8")
-    return minidom.parseString(raw).toprettyxml(indent="  ", encoding="utf-8")
 
 
 def parse_pubdate(raw: str | None) -> datetime:
@@ -91,7 +84,7 @@ def flaresolverr_get(target_url: str, timeout: int = 60) -> str:
         timeout=timeout + 10,
     )
     r.raise_for_status()
-    sol = r.json().get("solution") or {}
+    sol  = r.json().get("solution") or {}
     html = sol.get("response") or sol.get("body") or r.text
     return html
 
@@ -100,37 +93,11 @@ def flaresolverr_get(target_url: str, timeout: int = 60) -> str:
 # Full-text extraction
 # ---------------------------------------------------------------------------
 
-def fetch_full_text(article_url: str, timeout: int = 60) -> str:
-    """
-    Fetch an article page via FlareSolverr and extract body paragraphs
-    from .jw_article_body.  Returns joined text or "" on failure.
-    """
-    try:
-        html = flaresolverr_get(article_url, timeout)
-        soup = BeautifulSoup(html, "lxml")
-        body = soup.select_one(".jw_article_body")
-        if not body:
-            print(f"[WARN] .jw_article_body not found in {article_url}",
-                  file=sys.stderr)
-            return ""
-        paragraphs = [
-            p.get_text(separator=" ", strip=True)
-            for p in body.find_all("p")
-            if p.get_text(strip=True)
-        ]
-        return "\n\n".join(paragraphs)
-    except Exception as e:
-        print(f"[WARN] Full-text fetch failed for {article_url}: {e}",
-              file=sys.stderr)
-        return ""
-
-
 def fetch_featured_image(article_url: str, html: str | None = None) -> str:
     """
     Extract the high-res featured image URL from a Bangla Tribune article page.
     Looks for span[data-ari] JSON first, then falls back to og:image.
-    Pass pre-fetched html to avoid a second FlareSolverr round-trip, or
-    leave None to fetch the page here.
+    Pass pre-fetched html to avoid a second FlareSolverr round-trip.
     """
     import json as _json
 
@@ -140,8 +107,7 @@ def fetch_featured_image(article_url: str, html: str | None = None) -> str:
         except Exception:
             return ""
 
-    soup = BeautifulSoup(html, "lxml")
-
+    soup      = BeautifulSoup(html, "lxml")
     IMAGE_CDN = "https://cdn.banglatribune.net/contents/uploads/"
 
     featured = soup.select_one(".featured_image span[data-ari]")
@@ -166,7 +132,6 @@ def fetch_featured_image(article_url: str, html: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 def load_existing_items(path: str) -> list[dict]:
-    """Load saved items from an existing output XML file."""
     items = []
     if not os.path.exists(path):
         return items
@@ -190,16 +155,12 @@ def load_existing_items(path: str) -> list[dict]:
 
 
 def entry_to_element(entry: dict) -> tuple[ET.Element, str]:
-    """
-    Convert a feedparser entry to an <item> ET.Element.
-    Returns (element, rfc2822_pubdate_string).
-    """
     item = ET.Element("item")
 
     ET.SubElement(item, "title").text = entry.get("title", "")
     ET.SubElement(item, "link").text  = entry.get("link", "")
 
-    g = ET.SubElement(item, "guid")
+    g      = ET.SubElement(item, "guid")
     g.text = entry.get("link") or entry.get("id", "")
 
     desc = ET.SubElement(item, "description")
@@ -226,22 +187,29 @@ def save_xml(
     title: str,
     desc: str,
 ) -> None:
+    """
+    Write clean RSS 2.0 XML:
+    - ET.indent() for pretty-printing (no minidom, no blank lines)
+    - Standard <?xml ...?> declaration on line 1
+    - UTF-8 text file
+    """
     rss     = ET.Element("rss", version="2.0")
     channel = ET.SubElement(rss, "channel")
 
     ET.SubElement(channel, "title").text         = title
     ET.SubElement(channel, "link").text          = feed_url
     ET.SubElement(channel, "description").text   = desc
-    ET.SubElement(channel, "lastBuildDate").text = rfc2822(
-        datetime.now(timezone.utc)
-    )
+    ET.SubElement(channel, "lastBuildDate").text = rfc2822(datetime.now(timezone.utc))
 
     for it in final_items:
         channel.append(it["element"])
 
-    xml_bytes = prettify_xml(rss)
-    with open(path, "wb") as f:
-        f.write(xml_bytes)
+    ET.indent(rss, space="  ")
+    raw = ET.tostring(rss, encoding="unicode")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f'<?xml version="1.0" encoding="UTF-8"?>\n{raw}\n')
+
     print(f"[OK] {path} → {len(final_items)} items")
 
 
@@ -250,10 +218,10 @@ def save_xml(
 # ---------------------------------------------------------------------------
 
 def process_source(src: dict) -> None:
-    feed_url   = src["feed_url"]
-    out_path   = src["output"]
-    title      = src["title"]
-    desc       = src["desc"]
+    feed_url    = src["feed_url"]
+    out_path    = src["output"]
+    title       = src["title"]
+    desc        = src["desc"]
     link_filter = src.get("filter") or ""
 
     print(f"\n[INFO] Source  : {title}")
@@ -278,7 +246,7 @@ def process_source(src: dict) -> None:
         entries = [e for e in entries if link_filter in (e.get("link") or "")]
     print(f"[INFO] Feed entries after filter: {len(entries)}")
 
-    # 4. Build new item list
+    # 4. Build new item list from feed
     new_items: list[dict] = []
     for entry in entries:
         el, pub = entry_to_element(entry)
@@ -290,14 +258,14 @@ def process_source(src: dict) -> None:
         })
 
     # 5. Load existing saved items
-    existing      = load_existing_items(out_path)
+    existing       = load_existing_items(out_path)
     existing_guids = {e["guid"] for e in existing}
 
     # 6. Identify truly new entries
     truly_new = [n for n in new_items if n["guid"] not in existing_guids]
     print(f"[INFO] {len(truly_new)} new article(s) to enrich.")
 
-    # 7. Fetch full text (and better image) for each new item
+    # 7. Fetch full text + featured image for each new item
     for n in truly_new:
         url = n["link"]
         if not url:
@@ -321,8 +289,7 @@ def process_source(src: dict) -> None:
             full_text = "\n\n".join(paragraphs)
         else:
             full_text = ""
-            print(f"[WARN] .jw_article_body not found in {url}",
-                  file=sys.stderr)
+            print(f"[WARN] .jw_article_body not found in {url}", file=sys.stderr)
 
         if full_text:
             desc_el = n["element"].find("description")
@@ -335,11 +302,18 @@ def process_source(src: dict) -> None:
                   file=sys.stderr)
 
         # --- featured image ---
+        # RSS 2.0 enclosure requires url + length + type.
+        # We don't know the byte length without a HEAD request, so use 0.
+        # type contains "image" so feedparser's get_thumbnail() in the
+        # aggregator will pick it up via the enclosures check.
         image_url = fetch_featured_image(url, html=html)
         if image_url:
-            ET.SubElement(n["element"], "enclosure").set("url", image_url)
+            enc = ET.SubElement(n["element"], "enclosure")
+            enc.set("url",    image_url)
+            enc.set("length", "0")
+            enc.set("type",   "image/jpeg")
 
-    # 8. Merge: new_items override existing; unknown existing items appended
+    # 8. Merge: feed items override existing; orphan existing items appended
     store: dict[str, dict] = {}
     for n in new_items:
         store[n["guid"]] = n
